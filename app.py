@@ -6,6 +6,7 @@ from pypdf import PdfReader
 
 MODEL = "gemma3:1b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 QUIZ_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -35,9 +36,23 @@ QUIZ_RESPONSE_SCHEMA = {
 }
 
 
-def create_ollama_request(prompt, num_predict=100, response_format=None):
+@st.cache_data(ttl=30)
+def get_available_models():
+    with urllib.request.urlopen(OLLAMA_TAGS_URL, timeout=5) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    models = result.get("models", [])
+    return [
+        model["name"]
+        for model in models
+        if isinstance(model, dict) and isinstance(model.get("name"), str)
+    ]
+
+
+def create_ollama_request(
+    prompt, model, num_predict=100, response_format=None
+):
     data = {
-        "model": MODEL,
+        "model": model,
         "prompt": prompt,
         "stream": True,
         "options": {"num_predict": num_predict}
@@ -73,18 +88,50 @@ def stream_ollama(request):
 st.set_page_config(
     page_title="AI Study Buddy",
     page_icon="📚",
-    layout="centered"
+    layout="centered",
+    initial_sidebar_state="expanded"
 )
 
-st.title("📚 AI Study Buddy")
-st.subheader("Your free, local AI learning assistant")
-st.write("Ask questions, understand concepts, and practice learning.")
-st.caption("Powered by Ollama + Gemma 3 1B — no paid API tokens.")
+with st.sidebar:
+    st.title("AI Study Buddy", icon=":material/school:")
+    st.caption("Your personal space to learn and practice.")
+    st.subheader("AI tutor", icon=":material/smart_toy:")
+    try:
+        available_models = get_available_models()
+        if available_models:
+            default_model_index = (
+                available_models.index(MODEL) if MODEL in available_models else 0
+            )
+            selected_model = st.selectbox(
+                "Choose an Ollama model",
+                available_models,
+                index=default_model_index,
+                key="tutor_model"
+            )
+            st.caption(f"Running locally · {selected_model}")
+        else:
+            selected_model = None
+            st.error("No Ollama models are installed.")
+            st.caption(f"Install the default model with: `ollama pull {MODEL}`")
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+        selected_model = None
+        st.error("Could not connect to Ollama. Start Ollama to use the AI tutor.")
+        st.caption(str(error))
 
-uploaded_pdf = st.file_uploader(
-    "Upload your study notes (PDF)",
-    type=["pdf"]
-)
+    st.subheader("Study materials", icon=":material/menu_book:")
+    uploaded_pdf = st.file_uploader(
+        "Upload PDF notes",
+        type=["pdf"],
+        help="Use text-based PDF notes as context for chat and quizzes."
+    )
+    with st.expander("About this app"):
+        st.markdown(
+            "Chat and quizzes run locally with **Ollama** and "
+            f"**{selected_model or MODEL}**. Keep Ollama running while you study."
+        )
+
+st.title("Learn at your pace")
+st.caption("Ask questions, explore your notes, and check what you know.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -105,20 +152,22 @@ else:
             for page in reader.pages
         )
         st.session_state.pdf_pages = len(reader.pages)
-        st.success("PDF uploaded successfully!")
-        st.write("Pages:", st.session_state.pdf_pages)
+        st.sidebar.success(
+            f"{uploaded_pdf.name} · {st.session_state.pdf_pages} pages"
+        )
         if not st.session_state.pdf_text.strip():
-            st.warning("No readable text was found in this PDF.")
+            st.sidebar.warning("No readable text was found in this PDF.")
     except Exception as error:
         st.session_state.pdf_text = ""
         st.session_state.pdf_pages = 0
-        st.error("Could not read this PDF.")
-        st.caption(str(error))
+        st.sidebar.error("Could not read this PDF.")
+        st.sidebar.caption(str(error))
 
 mode = st.radio(
-    "Choose your study mode:",
+    "Choose a study mode",
     ["💬 Study Chat", "📝 Quiz Mode"],
-    horizontal=True
+    horizontal=True,
+    key="study_mode"
 )
 
 if mode == "💬 Study Chat":
@@ -126,7 +175,22 @@ if mode == "💬 Study Chat":
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    question = st.chat_input("Ask your study question...")
+    if not st.session_state.messages:
+        with st.container(border=True):
+            st.subheader("What would you like to understand?")
+            st.write(
+                "Ask a question in the chat box below. You can ask for "
+                "a simple explanation, an example, or help with your notes."
+            )
+            if st.session_state.pdf_text.strip():
+                st.caption("Your uploaded PDF will be used as study context.")
+            else:
+                st.caption("Tip: add a PDF in the sidebar to study from your notes.")
+
+    question = st.chat_input(
+        "Ask your study question...",
+        disabled=selected_model is None
+    )
 
     if question:
         st.session_state.messages.append(
@@ -141,8 +205,9 @@ if mode == "💬 Study Chat":
                 try:
                     if uploaded_pdf is not None and st.session_state.pdf_text.strip():
                         prompt = (
-                            "You are a friendly study assistant. "
-                            "Answer the student's question using the PDF notes below. "
+                            "You are a patient, friendly AI tutor. Teach clearly "
+                            "with simple words and examples. Answer the student's "
+                            "question using the PDF notes below. "
                             "If the notes do not contain the answer, say so.\n\n"
                             "PDF NOTES:\n"
                             + st.session_state.pdf_text[:12000]
@@ -151,13 +216,16 @@ if mode == "💬 Study Chat":
                         )
                     else:
                         prompt = (
-                            "You are a friendly study assistant for beginners. "
-                            "Explain clearly with simple words and examples.\n\n"
+                            "You are a patient, friendly AI tutor for beginners. "
+                            "Explain clearly with simple words and examples, "
+                            "and guide the student toward understanding.\n\n"
                             + question
                         )
 
                     answer = st.write_stream(
-                        stream_ollama(create_ollama_request(prompt))
+                        stream_ollama(
+                            create_ollama_request(prompt, selected_model)
+                        )
                     )
                     st.session_state.messages.append(
                         {"role": "assistant", "content": answer}
@@ -175,7 +243,21 @@ else:
     if "quiz_checked" not in st.session_state:
         st.session_state.quiz_checked = False
 
-    if st.button("Generate 5 quiz questions"):
+    if not st.session_state.quiz:
+        with st.container(border=True):
+            st.subheader("Ready to test your knowledge?")
+            if st.session_state.pdf_text.strip():
+                st.write("Create five multiple-choice questions from your notes.")
+            else:
+                st.write("Create five beginner-friendly Python questions.")
+
+    if st.button(
+        "Generate 5 quiz questions",
+        type="primary",
+        icon=":material/auto_awesome:",
+        width="stretch",
+        disabled=selected_model is None
+    ):
         st.session_state.quiz = []
         st.session_state.quiz_checked = False
         for i in range(5):
@@ -203,6 +285,7 @@ else:
                     stream_ollama(
                         create_ollama_request(
                             quiz_prompt,
+                            selected_model,
                             num_predict=1200,
                             response_format=QUIZ_RESPONSE_SCHEMA
                         )
@@ -239,15 +322,21 @@ else:
             st.error(f"Could not generate quiz: {error}")
 
     if st.session_state.quiz:
-        st.subheader("Your quiz")
+        st.subheader("Your quiz", icon=":material/quiz:")
         for i, item in enumerate(st.session_state.quiz):
-            st.radio(
-                item["question"],
-                item["options"],
-                key=f"question_{i}"
-            )
+            with st.container(border=True):
+                st.radio(
+                    f"{i + 1}. {item['question']}",
+                    item["options"],
+                    key=f"question_{i}"
+                )
 
-        if st.button("Submit Quiz"):
+        if st.button(
+            "Submit quiz",
+            type="primary",
+            icon=":material/check_circle:",
+            width="stretch"
+        ):
             st.session_state.quiz_checked = True
 
         if st.session_state.quiz_checked:
