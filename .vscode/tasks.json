@@ -4,12 +4,20 @@
 		{
 			"label": "Run AI Study Buddy",
 			"type": "shell",
-			"command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
-				"-m",
-				"streamlit",
-				"run",
-				"app.py"
+				"run_local.py"
+			],
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Run AI Study Buddy with AI Repairs",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"dev_runner.py"
 			],
 			"isBackground": true,
 			"problemMatcher": [],
